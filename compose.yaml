@@ -1,0 +1,145 @@
+version: '3.4'
+
+x-common-env-vars: &common-env-vars
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql://postgres:postgres@postgres:5434
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://postgres:postgres@postgres:5436
+  AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+  AIRFLOW__CORE__FERNET_KEY: "hadhashdjdbjbdqwjwjbd"
+  AIRFLOW__WEBSERVER__SECRET_KEY: "adfnewjfjqef"
+  AIRFLOW__WEBSERVER__RBAC: "True"
+  AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+  AIRFLOW__CORE__TEST_CONNECTION: "Enabled"
+  AIRFLOW__API__WARN_DEPLOYMENT_EXPOSURE: "False"
+  ASTRONOMER_ENVIRONMENT: local
+
+networks:
+  airflow:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  airflow_logs:
+    driver: local
+
+services:
+  postgres:
+    image: docker.io/postgres:12.6
+    restart: unless-stopped
+    networks:
+      - airflow
+    labels:
+      io.astronomer.docker: "true"
+      io.astronomer.docker.cli: "true"
+    ports:
+      - 5433:5432
+    volumes:
+      
+      - postgres_data:/var/lib/postgresql/data
+      
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+
+  scheduler:
+    image: airflow-projects_d12e19/airflow:latest
+    command: >
+      bash -c "(airflow db upgrade || airflow upgradedb) && airflow scheduler"
+    restart: unless-stopped
+    networks:
+      - airflow
+    user: astro
+    labels:
+      io.astronomer.docker: "true"
+      io.astronomer.docker.cli: "true"
+      io.astronomer.docker.component: "airflow-scheduler"
+    depends_on:
+      - postgres
+    environment: *common-env-vars
+    volumes:
+      - /home/timdata/airflow_projects/dags:/usr/local/airflow/dags:z
+      - /home/timdata/airflow_projects/plugins:/usr/local/airflow/plugins:z
+      - /home/timdata/airflow_projects/include:/usr/local/airflow/include:z
+      - /home/timdata/airflow_projects/tests:/usr/local/airflow/tests:z
+
+      - /home/timdata/airflow_projects/airflow_settings.yaml:/usr/local/airflow/airflow_settings.yaml:z
+
+      
+      - airflow_logs:/usr/local/airflow/logs
+      
+    
+
+  webserver:
+    image: airflow-projects_d12e19/airflow:latest
+    command: >
+      bash -c 'if [[ -z "$$AIRFLOW__API__AUTH_BACKEND" ]] && [[ $$(pip show -f apache-airflow | grep basic_auth.py) ]];
+        then export AIRFLOW__API__AUTH_BACKEND=airflow.api.auth.backend.basic_auth ;
+        else export AIRFLOW__API__AUTH_BACKEND=airflow.api.auth.backend.default ; fi &&
+        { airflow users create "$$@" || airflow create_user "$$@" ; } &&
+        { airflow sync-perm || airflow sync_perm ;} &&
+        airflow webserver' -- -r Admin -u admin -e admin@example.com -f admin -l user -p admin
+    restart: unless-stopped
+    networks:
+      - airflow
+    user: astro
+    labels:
+      io.astronomer.docker: "true"
+      io.astronomer.docker.cli: "true"
+      io.astronomer.docker.component: "airflow-webserver"
+    depends_on:
+      - scheduler
+      - postgres
+    environment: *common-env-vars
+    ports:
+      - 8081:8080
+    volumes:
+      - /home/timdata/airflow_projects/dags:/usr/local/airflow/dags:z
+      - /home/timdata/airflow_projects/plugins:/usr/local/airflow/plugins:z
+      - /home/timdata/airflow_projects/include:/usr/local/airflow/include:z
+      - /home/timdata/airflow_projects/tests:/usr/local/airflow/tests:z
+      
+      - airflow_logs:/usr/local/airflow/logs
+      
+    healthcheck:
+      test: curl --fail http://webserver:8080/health || exit 1
+      interval: 2s
+      retries: 15
+      start_period: 5s
+      timeout: 60s
+    
+
+  triggerer:
+    image: airflow-projects_d12e19/airflow:latest
+    command: >
+      bash -c "(airflow db upgrade || airflow upgradedb) && airflow triggerer"
+    restart: unless-stopped
+    networks:
+      - airflow
+    user: astro
+    labels:
+      io.astronomer.docker: "true"
+      io.astronomer.docker.cli: "true"
+      io.astronomer.docker.component: "airflow-triggerer"
+    depends_on:
+      - postgres
+    environment: *common-env-vars
+    volumes:
+      - /home/timdata/airflow_projects/dags:/usr/local/airflow/dags:z
+      - /home/timdata/airflow_projects/plugins:/usr/local/airflow/plugins:z
+      - /home/timdata/airflow_projects/include:/usr/local/airflow/include:z
+      
+      - airflow_logs:/usr/local/airflow/logs
+      
+  # Git-sync container
+  git-sync:
+    image: databurst/git-sync:latest  
+    environment:
+      REPO_URL: git@github.com:V-Analystic/airflow_projects.git
+      GIT_BRANCH: main
+      DESTINATION_PATH: /usr/local/airflow
+      INTERVAL: 3
+    volumes:
+      - /home/timdata/.ssh/id_ed25519:/root/.ssh/id_ed25519
+      - /home/timdata/.ssh/id_ed25519.pub:/root/.ssh/id_ed25519.pub
+      - /home/timdata/airflow_projects:/usr/local/airflow
